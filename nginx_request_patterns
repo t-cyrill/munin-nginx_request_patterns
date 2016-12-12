@@ -1,0 +1,134 @@
+#!/usr/bin/perl -w
+# -*- perl -*-
+
+=head1 NAME
+
+nginx_request_patterns - Munin plugin to monitor the number of access pattern
+
+=head1 APPLICABLE SYSTEMS
+
+None needed
+
+=head1 CONFIGURATION
+
+File::ReadBackwards is used and must be installed.
+
+You can override the log file location.
+
+[nginx_request_patterns]
+    env.logfile /var/log/nginx/access.log,/var/log/nginx/access.log.1
+    env.loglimit 1000
+    env.log_format tsv|ltsv
+    env.log_method_idx 9
+    env.log_uri_idx 10
+
+Nginx must be configured to get $request_method and $request_uri.
+nginx_request_patterns expects LTSV log format.
+
+By default the last 1000 log lines are read, you may want to change this.
+
+=head1 INTERPRETATION
+
+None
+
+=head1 MAGIC MARKERS
+
+  #%# family=auto
+  #%# capabilities=autoconf
+
+=head1 VERSION
+
+  $Id$
+
+=cut
+
+use File::ReadBackwards;
+use Digest::MD5 qw(md5 md5_hex md5_base64);
+
+my $line_counter = exists $ENV{'loglimit'} ? $ENV{'loglimit'} : 1000;
+my $LOGS = exists $ENV{'logfile'} ? $ENV{'logfile'}
+                                : "/var/log/nginx/access.log,/var/log/nginx/access.log.1";
+my $log_format = exists $ENV{'log_format'} ? $ENV{'log_format'} : "tsv";
+my $ltsv_flag = $log_format eq "ltsv" ? 1 : 0;
+my @colors = ("FF0000", "00FF00", "0000FF", "FF5E00", "FF00FF", "00FFFF");
+my @patterns = exists $ENV{'patterns'} ? (split ",", $ENV{'patterns'}) : ();
+push @patterns, ".*";
+my $log_method_idx = exists $ENV{'log_method_idx'} ? $ENV{'log_method_idx'} : 1;
+my $log_uri_idx = exists $ENV{'log_uri_idx'} ? $ENV{'log_uri_idx'} : 2;
+my $log_match = exists $ENV{'log_match'} ? $ENV{'log_match'} : "";
+my $log_exclude = exists $ENV{'log_exclude'} ? $ENV{'log_exclude'} : "";
+
+if (defined($ARGV[0])) {
+    if ($ARGV[0] eq 'autoconf') {
+        unless (-r $LOG) {
+            print "$LOG not readable\n";
+        } else {
+            print "yes\n";
+        }
+        exit 0;
+    }
+
+    if ($ARGV[0] eq "config") {
+        print "graph_title nginx request patterns\n";
+        print "graph_args --base 1000 -l 0\n";
+        print "graph_vlabel Request\n";
+        print "graph_scale no\n";
+        print "graph_category nginx\n";
+
+        for ($i = 0; $i < scalar @patterns; $i++) {
+            $digest = md5_hex($patterns[$i]);
+            printf "pattern_%s.label %s\n", $digest, $patterns[$i];
+            printf "pattern_%s.draw LINE2\n", $digest;
+            printf "pattern_%s.colour %s\n", $digest, $colors[$i%(scalar @colors)];
+        }
+        exit 0;
+    }
+}
+
+my @patterns_cnt = ();
+for (my $i = 0; $i < scalar @patterns; $i++) {
+    $patterns_cnt[$i] = 0;
+}
+
+my $i = 0;
+for my $log (split(",", $LOGS)) {
+    my $log_handle = File::ReadBackwards->new($log);
+    while ($i < $line_counter) {
+        my $log_line = $log_handle->readline;
+
+        if (defined($log_line)) {
+            unless ($log_match eq "") {
+                unless ($log_line =~ /$log_match/) {
+                   next;
+                }
+            }
+            unless ($log_exclude eq "") {
+                if ($log_line =~ /$log_exclude/) {
+                    next;
+                }
+            }
+
+            my @tmp = split("\t", $log_line);
+            my $method = $ltsv_flag ? (split(":", $tmp[$log_method_idx]))[1] : $tmp[$log_method_idx];
+            my $path = $ltsv_flag ? (split(":", $tmp[$log_uri_idx]))[1] : $tmp[$log_uri_idx];
+            my $uri = "${method} ${path}";
+
+            for ($j = 0; $j < scalar @patterns; $j++) {
+                if ($uri =~ /$patterns[$j]/) {
+                    $patterns_cnt[$j]++;
+                    $i++;
+                    last;
+                }
+            }
+        } else {
+            last;
+        }
+    }
+    last unless ($i < $line_counter);
+    $log_handle->close;
+}
+
+for (my $i = 0; $i < scalar @patterns; $i++) {
+    $digest = md5_hex($patterns[$i]);
+    printf "pattern_%s.value %d\n", $digest, $patterns_cnt[$i];
+}
